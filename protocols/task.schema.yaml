@@ -1,0 +1,18 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://devrelay-x.local/protocols/task.schema.yaml"
+title: TaskEnvelope
+type: object
+required: [id, requirement_id, title, status]
+properties:
+  id:
+    type: string
+  requirement_id:
+    type: string
+  title:
+    type: string
+    minLength: 1
+  status:
+    type: string
+    enum:
+      [created, assigned, in_progress, implemented, verifying, reviewing,
+       pass, fail, blocked, cancelled]

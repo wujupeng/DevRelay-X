@@ -1,0 +1,20 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://devrelay-x.local/protocols/evidence.schema.yaml"
+title: EvidenceEnvelope
+type: object
+required: [id, task_id, type, producer, result]
+properties:
+  id:
+    type: string
+  task_id:
+    type: string
+  type:
+    type: string
+    enum: [commit, test, review, policy, artifact]
+  producer:
+    type: string
+  result:
+    type: string
+    enum: [pass, fail, blocked]
+  metadata:
+    type: object

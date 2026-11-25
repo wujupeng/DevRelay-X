@@ -1,0 +1,24 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://devrelay-x.local/protocols/relay.schema.yaml"
+title: RelayEnvelope
+type: object
+required: [id, task_id, to_agent_id, status]
+properties:
+  id:
+    type: string
+    minLength: 1
+  task_id:
+    type: string
+    minLength: 1
+  from_agent_id:
+    type: [string, "null"]
+  to_agent_id:
+    type: string
+    minLength: 1
+  status:
+    type: string
+    enum: [pending, accepted, active, completed, rejected, expired]
+  evidence_ids:
+    type: array
+    items:
+      type: string
