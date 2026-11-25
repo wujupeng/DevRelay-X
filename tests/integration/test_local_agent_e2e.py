@@ -205,6 +205,8 @@ def test_task_to_agent_run_evidence_and_gate(tmp_path: Path, database_session: S
         "completed",
     ]
     assert result.evidence["changed_files"] == ["calculator.py"]
+    assert result.evidence["commit_created"] is True
+    assert result.evidence["final_commit"] != result.evidence["initial_commit"]
     assert result.evidence["test_exit_code"] == 0
     assert "2 passed" in result.evidence["test_output"]
     assert "+    return left + right" in result.evidence["diff"]
@@ -216,7 +218,8 @@ def test_task_to_agent_run_evidence_and_gate(tmp_path: Path, database_session: S
         select(EvidenceRecord).where(EvidenceRecord.run_id == result.run_id)
     ).one()
     assert task is not None and task.status == "pass"
-    assert run is not None and run.status == "completed" and run.final_commit
+    assert run is not None and run.status == "completed"
+    assert run.final_commit == result.evidence["final_commit"]
     assert evidence.result == "pass"
 
 

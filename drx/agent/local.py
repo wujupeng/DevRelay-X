@@ -20,6 +20,7 @@ from drx.evidence.test import TestEvidence
 from drx.execution.lifecycle import ExecutionLifecycle
 from drx.execution.prompt import TaskPromptBuilder, TaskPromptInput
 from drx.execution.test_runner import TestRunner
+from drx.git.service import GitService
 from drx.models.agent import AgentRecord
 from drx.models.evidence import EvidenceRecord
 from drx.models.gate import GateRecord
@@ -55,6 +56,7 @@ class LocalCodingAgent:
         workspace_manager: WorkspaceManager,
         test_config: TestConfig | None = None,
         policy_engine: PolicyEngine | None = None,
+        allow_local_commit: bool = True,
     ) -> None:
         self.agent_id = agent_id
         self.name = name
@@ -64,6 +66,7 @@ class LocalCodingAgent:
         self.prompt_builder = TaskPromptBuilder()
         self.gate_engine = GateEngine()
         self.policy_engine = policy_engine or PolicyEngine()
+        self.allow_local_commit = allow_local_commit
 
     def identify(self) -> dict[str, str]:
         return {"id": self.agent_id, "name": self.name, "type": "local-coding-agent"}
@@ -334,6 +337,17 @@ class LocalCodingAgent:
                 task_record.status = task.status.value
             session.commit()
 
+            commit_failed = False
+            if test_result.passed and self.allow_local_commit:
+                self._authorize("git.commit", "G5_GIT")
+                try:
+                    GitService(
+                        workspace.repository, allow_local_commit=True
+                    ).commit(f"DevRelay-X task {task_record.id}")
+                except (OSError, subprocess.SubprocessError) as error:
+                    commit_failed = True
+                    failure_reason = f"local workspace commit failed: {error}"
+
             try:
                 self._authorize("git.collect_evidence", "G5_GIT")
                 git_evidence = collector.collect(workspace.initial_head)
@@ -341,7 +355,15 @@ class LocalCodingAgent:
                 raise AgentRunFailure(
                     "Git evidence could not be collected", gate_id="G5_GIT"
                 ) from error
-            checks["G5_GIT"] = True
+            checks["G5_GIT"] = (
+                not commit_failed
+                and bool(git_evidence.changed_files)
+                and (
+                    git_evidence.commit_created
+                    if test_result.passed and self.allow_local_commit
+                    else bool(git_evidence.diff.strip())
+                )
+            )
             self._transition_run(
                 session, agent_run, run_record, AgentRunState.EVIDENCE_COLLECTED
             )

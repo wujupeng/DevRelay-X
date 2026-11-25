@@ -8,6 +8,7 @@ def test_policy_allows_explicit_default_action_and_denies_unknown_actions() -> N
     policy = PolicyEngine()
 
     assert policy.evaluate("workspace.create").allowed
+    assert policy.evaluate("git.commit").allowed
     assert not policy.evaluate("shell.execute").allowed
     assert not policy.evaluate("git.push").allowed
     assert not policy.evaluate("").allowed

@@ -65,6 +65,24 @@ def test_git_diff_rejects_binary_patch_and_git_service_push(tmp_path: Path) -> N
         GitService(repository, allow_local_commit=False).commit("not allowed")
 
 
+def test_git_service_creates_local_agent_commit(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    initial_head = _init_repository(repository)
+    (repository / "source.py").write_text("value = 2\n", encoding="utf-8")
+
+    commit_hash = GitService(repository).commit("DevRelay-X local test")
+    author_name = subprocess.run(
+        ["git", "show", "-s", "--format=%an", commit_hash],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert commit_hash != initial_head
+    assert author_name == "DevRelay-X Local Agent"
+
+
 def test_git_evidence_retains_changes_after_a_local_commit(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     initial_head = _init_repository(repository)

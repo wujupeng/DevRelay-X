@@ -150,6 +150,7 @@ def agent_run(
             control_repository=control_root,
             allow_control_repository=config.workspace.allow_control_repository,
         ),
+        allow_local_commit=config.security.allow_local_commit,
         test_config=config.test,
     )
     try:

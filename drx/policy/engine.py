@@ -21,6 +21,7 @@ class PolicyEngine:
             "workspace.apply_diff",
             "tests.run",
             "git.collect_evidence",
+            "git.commit",
         }
     )
 

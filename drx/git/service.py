@@ -25,14 +25,19 @@ class GitService:
             raise PermissionError("Git command is not allowed by the local policy")
         return self._execute(*args)
 
-    def _execute(self, *args: str) -> str:
+    def _execute(
+        self, *args: str, extra_environment: dict[str, str] | None = None
+    ) -> str:
+        environment = git_environment()
+        if extra_environment:
+            environment.update(extra_environment)
         result = subprocess.run(
             ["git", *args],
             cwd=self.repository,
             check=True,
             capture_output=True,
             text=True,
-            env=git_environment(),
+            env=environment,
         )
         return result.stdout.strip()
 
@@ -43,4 +48,15 @@ class GitService:
         if not self.allow_local_commit:
             raise PermissionError("local Git commits are disabled by policy")
         self._execute("add", "-A")
-        return self._execute("commit", "-m", message)
+        self._execute(
+            "commit",
+            "-m",
+            message,
+            extra_environment={
+                "GIT_AUTHOR_NAME": "DevRelay-X Local Agent",
+                "GIT_AUTHOR_EMAIL": "local-agent@devrelay.invalid",
+                "GIT_COMMITTER_NAME": "DevRelay-X Local Agent",
+                "GIT_COMMITTER_EMAIL": "local-agent@devrelay.invalid",
+            },
+        )
+        return self._execute("rev-parse", "HEAD")

@@ -30,4 +30,6 @@ Control Plane -> LocalCodingAgent -> ModelRuntime
                   Gate Engine -> PASS / FAIL / BLOCKED
 ```
 
-No Git push, merge, deployment, or automatic commit is implemented.
+When local commits are enabled, a passing test run is committed inside the managed
+workspace and the resulting commit is included in Git evidence. The agent never
+pushes, merges, or deploys.
