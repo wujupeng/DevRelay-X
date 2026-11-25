@@ -11,6 +11,7 @@ class EvidenceRecord(Base):
     task_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("tasks.id"), nullable=False
     )
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     producer: Mapped[str] = mapped_column(String(200), nullable=False)
     result: Mapped[str] = mapped_column(String(32), nullable=False)

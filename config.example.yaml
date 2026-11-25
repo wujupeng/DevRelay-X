@@ -1,0 +1,23 @@
+agent:
+  id: local-agent-001
+  name: Local Coding Agent
+
+runtime:
+  type: http_compatible
+  endpoint: http://127.0.0.1:8080/v1/chat/completions
+  model: SET_YOUR_LOCAL_MODEL_ID
+  timeout_seconds: 120
+  max_tokens: 4096
+  temperature: 0.1
+
+workspace:
+  root: ~/.devrelay-x/workspaces
+  allow_control_repository: false
+
+test:
+  framework: auto
+  timeout_seconds: 600
+
+security:
+  allow_local_commit: true
+  allow_remote_push: false

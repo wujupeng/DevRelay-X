@@ -10,11 +10,11 @@ properties:
     type: string
   type:
     type: string
-    enum: [commit, test, review, policy, artifact]
+    enum: [commit, test, review, policy, artifact, execution]
   producer:
     type: string
   result:
     type: string
-    enum: [pass, fail, blocked]
+    enum: [pass, fail, blocked, hold]
   metadata:
     type: object

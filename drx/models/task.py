@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from drx.storage.database import Base
@@ -13,3 +13,5 @@ class TaskRecord(Base):
     )
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
+    objective: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    acceptance_criteria_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")

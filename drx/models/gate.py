@@ -11,5 +11,6 @@ class GateRecord(Base):
     task_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("tasks.id"), nullable=False
     )
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str] = mapped_column(String(500), nullable=False)
