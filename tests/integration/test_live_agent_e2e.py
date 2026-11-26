@@ -16,6 +16,7 @@ from drx.models.project import ProjectRecord
 from drx.models.requirement import RequirementRecord
 from drx.models.run import RunRecord
 from drx.models.task import TaskRecord
+from drx.policy.engine import PolicyEngine
 from drx.runtime.config import RuntimeConfig
 from drx.runtime.http import LocalHTTPRuntime
 from drx.storage.database import create_database
@@ -118,6 +119,11 @@ def test_live_model_agent_to_gate(tmp_path: Path) -> None:
                 control_repository=Path(__file__).parents[2],
             ),
             test_config=TestConfig(framework="pytest", timeout_seconds=180),
+            policy_engine=PolicyEngine(
+                allowed_actions=(
+                    PolicyEngine.DEFAULT_ALLOWED_ACTIONS | PolicyEngine.HIGH_RISK_ACTIONS
+                )
+            ),
         )
         result = agent.execute(session, "live-calculator-task")
         evidence = result.evidence

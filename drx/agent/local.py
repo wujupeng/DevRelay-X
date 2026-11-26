@@ -17,6 +17,7 @@ from drx.core.task import Task, TaskStatus, transition_task
 from drx.evidence.execution import AgentEvidence, redact_secrets
 from drx.evidence.git import GitEvidence, GitEvidenceCollector
 from drx.evidence.test import TestEvidence
+from drx.evidence.verifier import EvidenceVerificationError, EvidenceVerifier
 from drx.execution.lifecycle import ExecutionLifecycle
 from drx.execution.prompt import TaskPromptBuilder, TaskPromptInput
 from drx.execution.test_runner import TestRunner
@@ -64,7 +65,8 @@ class LocalCodingAgent:
         self.workspace_manager = workspace_manager
         self.test_runner = TestRunner(test_config)
         self.prompt_builder = TaskPromptBuilder()
-        self.gate_engine = GateEngine()
+        self.evidence_verifier = EvidenceVerifier()
+        self.gate_engine = GateEngine(self.evidence_verifier)
         self.policy_engine = policy_engine or PolicyEngine()
         self.allow_local_commit = allow_local_commit
 
@@ -75,10 +77,14 @@ class LocalCodingAgent:
         return AgentCapabilities(
             (
                 AgentCapability("task-prompting", "Builds deterministic task prompts"),
+                AgentCapability("runtime-health-check", "Checks model runtime availability"),
+                AgentCapability("runtime-generation", "Requests model-generated changes"),
                 AgentCapability("workspace-isolation", "Uses a managed Git workspace"),
+                AgentCapability("workspace-context-read", "Reads permitted workspace context"),
                 AgentCapability("unified-diff-only", "Applies validated unified diffs"),
                 AgentCapability("test-execution", "Executes the configured Python test suite"),
                 AgentCapability("git-evidence", "Collects status, diff, and commit evidence"),
+                AgentCapability("git-commit", "Creates a managed local Git commit"),
             )
         )
 
@@ -197,11 +203,11 @@ class LocalCodingAgent:
 
         try:
             self._transition_run(session, agent_run, run_record, AgentRunState.PREPARING)
-            self._authorize("task.execute", "G2_TASK")
-            self._authorize("runtime.health_check", "G0_ENVIRONMENT")
+            self._authorize("task.execute", "G2_TASK", checks)
+            self._authorize("runtime.health_check", "G0_ENVIRONMENT", checks)
             try:
                 runtime_available = self.runtime.health_check()
-            except httpx.HTTPError as error:
+            except (httpx.HTTPError, RuntimeError) as error:
                 raise AgentRunFailure(
                     "configured model runtime is unavailable",
                     gate_id="G0_ENVIRONMENT",
@@ -241,7 +247,7 @@ class LocalCodingAgent:
                     task_record.title,
                     TaskStatus(task_record.status),
                 )
-                transition_task(task, TaskStatus.IN_PROGRESS)
+                task = transition_task(task, TaskStatus.IN_PROGRESS)
             except ValueError as error:
                 raise AgentRunFailure(
                     "task is not in an executable state", gate_id="G2_TASK"
@@ -251,7 +257,7 @@ class LocalCodingAgent:
             session.commit()
 
             self._transition_run(session, agent_run, run_record, AgentRunState.RUNNING)
-            self._authorize("workspace.create", "G1_WORKSPACE")
+            self._authorize("workspace.create", "G1_WORKSPACE", checks)
             workspace = self.prepare_workspace(
                 f"run-{run_id}", project.repository, branch
             )
@@ -261,7 +267,7 @@ class LocalCodingAgent:
             session.commit()
 
             try:
-                self._authorize("workspace.context.read", "G1_WORKSPACE")
+                self._authorize("workspace.context.read", "G1_WORKSPACE", checks)
                 context = self.workspace_manager.collect_context(workspace)
             except (WorkspaceError, OSError, subprocess.SubprocessError) as error:
                 raise AgentRunFailure(
@@ -277,10 +283,10 @@ class LocalCodingAgent:
                 workspace_path=str(workspace.repository),
                 workspace_context=context,
             )
-            self._authorize("runtime.generate", "G3_EXECUTION")
+            self._authorize("runtime.generate", "G3_EXECUTION", checks)
             try:
                 patch = self.runtime.generate(prompt)
-            except (httpx.HTTPError, ValueError) as error:
+            except (httpx.HTTPError, RuntimeError, ValueError) as error:
                 raise AgentRunFailure(
                     "model runtime failed during generation",
                     gate_id="G3_EXECUTION",
@@ -288,9 +294,9 @@ class LocalCodingAgent:
                 ) from error
             collector = GitEvidenceCollector(workspace.repository)
             try:
-                self._authorize("workspace.apply_diff", "G3_EXECUTION")
+                self._authorize("workspace.apply_diff", "G3_EXECUTION", checks)
                 collector.apply_patch(patch)
-                self._authorize("git.collect_evidence", "G5_GIT")
+                self._authorize("git.collect_evidence", "G5_GIT", checks)
                 git_evidence = collector.collect(workspace.initial_head)
             except PermissionError as error:
                 raise AgentRunFailure(
@@ -310,17 +316,19 @@ class LocalCodingAgent:
                     gate_id="G3_EXECUTION",
                     state=AgentRunState.FAILED,
                 )
-            transition_task(task, TaskStatus.IMPLEMENTED)
-            transition_task(task, TaskStatus.VERIFYING)
+            task = transition_task(task, TaskStatus.IMPLEMENTED)
+            task_record.status = task.status.value
+            session.flush()
+            task = transition_task(task, TaskStatus.VERIFYING)
             task_record.status = task.status.value
             self._transition_run(session, agent_run, run_record, AgentRunState.CHANGED)
             self._transition_run(session, agent_run, run_record, AgentRunState.TESTING)
             session.commit()
 
             try:
-                self._authorize("tests.run", "G4_TEST")
+                self._authorize("tests.run", "G4_TEST", checks)
                 test_result = self.test_runner.run(workspace.repository)
-            except (OSError, subprocess.SubprocessError) as error:
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 raise AgentRunFailure(
                     "no configured Python test suite could be found",
                     gate_id="G4_TEST",
@@ -332,24 +340,54 @@ class LocalCodingAgent:
                 else AgentRunState.TEST_FAIL
             )
             self._transition_run(session, agent_run, run_record, test_state)
+            if test_result.passed:
+                if git_evidence is None or workspace is None:
+                    raise AgentRunFailure(
+                        "pre-test Git evidence is unavailable",
+                        gate_id="G5_GIT",
+                        state=AgentRunState.FAILED,
+                    )
+                try:
+                    self._authorize("git.collect_evidence", "G5_GIT", checks)
+                    post_test_git = collector.collect(workspace.initial_head)
+                except (RuntimeError, subprocess.SubprocessError) as error:
+                    raise AgentRunFailure(
+                        "Git evidence could not be collected after tests",
+                        gate_id="G5_GIT",
+                        state=AgentRunState.FAILED,
+                    ) from error
+                if (
+                    post_test_git.final_head != git_evidence.final_head
+                    or post_test_git.branch != git_evidence.branch
+                    or post_test_git.changed_files != git_evidence.changed_files
+                    or post_test_git.diff != git_evidence.diff
+                ):
+                    git_evidence = post_test_git
+                    checks["G4_TEST"] = None
+                    raise AgentRunFailure(
+                        "workspace changed during test execution; test results cannot "
+                        "be bound to the committed diff",
+                        gate_id="G4_TEST",
+                        state=AgentRunState.FAILED,
+                    )
             if not test_result.passed:
-                transition_task(task, TaskStatus.FAIL)
+                task = transition_task(task, TaskStatus.FAIL)
                 task_record.status = task.status.value
             session.commit()
 
             commit_failed = False
             if test_result.passed and self.allow_local_commit:
-                self._authorize("git.commit", "G5_GIT")
+                self._authorize("git.commit", "G5_GIT", checks)
                 try:
                     GitService(
                         workspace.repository, allow_local_commit=True
                     ).commit(f"DevRelay-X task {task_record.id}")
-                except (OSError, subprocess.SubprocessError) as error:
+                except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                     commit_failed = True
                     failure_reason = f"local workspace commit failed: {error}"
 
             try:
-                self._authorize("git.collect_evidence", "G5_GIT")
+                self._authorize("git.collect_evidence", "G5_GIT", checks)
                 git_evidence = collector.collect(workspace.initial_head)
             except (RuntimeError, subprocess.SubprocessError) as error:
                 raise AgentRunFailure(
@@ -358,11 +396,7 @@ class LocalCodingAgent:
             checks["G5_GIT"] = (
                 not commit_failed
                 and bool(git_evidence.changed_files)
-                and (
-                    git_evidence.commit_created
-                    if test_result.passed and self.allow_local_commit
-                    else bool(git_evidence.diff.strip())
-                )
+                and git_evidence.commit_created
             )
             self._transition_run(
                 session, agent_run, run_record, AgentRunState.EVIDENCE_COLLECTED
@@ -385,12 +419,12 @@ class LocalCodingAgent:
                 TaskStatus.IMPLEMENTED.value,
                 TaskStatus.VERIFYING.value,
             }:
-                transition_task(
+                blocked_task = transition_task(
                     Task(task_record.id, task_record.requirement_id, task_record.title,
                          TaskStatus(task_record.status)),
                     TaskStatus.BLOCKED,
                 )
-                task_record.status = TaskStatus.BLOCKED.value
+                task_record.status = blocked_task.status.value
             session.commit()
 
         ended_at = datetime.now(UTC)
@@ -434,10 +468,45 @@ class LocalCodingAgent:
             metadata_json=json.dumps(provisional_evidence.to_dict(), ensure_ascii=True),
         )
         session.add(evidence_row)
+        run_record.final_commit = provisional_evidence.final_commit
         session.flush()
-        checks["G6_EVIDENCE"] = True
+        verified_evidence = None
+        if (
+            task_record.status == TaskStatus.VERIFYING
+            and agent_run.state is AgentRunState.EVIDENCE_COLLECTED
+            and test_result is not None
+            and git_evidence is not None
+        ):
+            try:
+                verified_evidence = self.evidence_verifier.attest(
+                    task=task_record,
+                    run=agent_run,
+                    run_record=run_record,
+                    evidence_record=evidence_row,
+                    evidence=provisional_evidence,
+                    git_evidence=git_evidence,
+                    test_evidence=test_result,
+                )
+            except EvidenceVerificationError as error:
+                verification_failure = (
+                    f"execution evidence could not be verified: {error}"
+                )
+                failure_reason = (
+                    f"{failure_reason}; {verification_failure}"
+                    if failure_reason
+                    else verification_failure
+                )
+        checks["G6_EVIDENCE"] = verified_evidence is not None
 
-        gate_decision, gate_results = self.gate_engine.evaluate_gates(checks)
+        gate_evaluation = self.gate_engine.evaluate_gates(
+            checks,
+            evidence=verified_evidence,
+            task_id=task_id,
+            run_id=run_id,
+            agent_id=self.agent_id,
+        )
+        gate_decision = gate_evaluation.decision
+        gate_results = gate_evaluation.results
         if agent_run.state in {
             AgentRunState.TEST_PASS,
             AgentRunState.TEST_FAIL,
@@ -459,9 +528,7 @@ class LocalCodingAgent:
             )
             self._transition_run(session, agent_run, run_record, final_state)
 
-        if gate_decision == GateDecision.PASS and task_record.status == TaskStatus.VERIFYING:
-            self._transition_task_record(task_record, TaskStatus.PASS)
-        elif gate_decision == GateDecision.FAIL and task_record.status == TaskStatus.VERIFYING:
+        if gate_decision == GateDecision.FAIL and task_record.status == TaskStatus.VERIFYING:
             self._transition_task_record(task_record, TaskStatus.FAIL)
         elif gate_decision in {GateDecision.BLOCKED, GateDecision.HOLD} and task_record.status in {
             TaskStatus.CREATED.value,
@@ -500,6 +567,9 @@ class LocalCodingAgent:
                     reason=result.reason,
                 )
             )
+        session.flush()
+        if gate_decision == GateDecision.PASS:
+            self.gate_engine.transition_task_to_pass(task_record, gate_evaluation)
         session.commit()
         return AgentRunResult(run_id, agent_run.state, gate_decision.value, evidence_data)
 
@@ -518,6 +588,40 @@ class LocalCodingAgent:
         payload = json.loads(record.metadata_json)
         if not isinstance(payload, dict):
             raise ValueError("persisted AgentRun evidence is not a JSON object")
+        run_record = session.get(RunRecord, result.run_id)
+        task_record = session.get(TaskRecord, record.task_id)
+        if (
+            run_record is None
+            or task_record is None
+            or record.type != "execution"
+            or record.run_id != result.run_id
+            or record.producer != run_record.agent_id
+            or run_record.task_id != record.task_id
+            or run_record.status != result.state.value
+            or record.result != result.gate_decision
+            or payload != result.evidence
+            or run_record.evidence_json != record.metadata_json
+            or payload.get("gate_decision") != result.gate_decision
+        ):
+            raise ValueError("AgentRun and persisted execution evidence do not match")
+        if result.gate_decision == GateDecision.PASS.value:
+            gate_records = session.scalars(
+                select(GateRecord).where(GateRecord.run_id == result.run_id)
+            ).all()
+            if (
+                task_record.status != TaskStatus.PASS.value
+                or run_record.status != AgentRunState.COMPLETED.value
+                or tuple(sorted(gate_record.id.split(":", 1)[-1] for gate_record in gate_records))
+                != tuple(sorted(GateEngine.REQUIRED_GATES))
+                or any(
+                    gate_record.decision != GateStatus.PASS.value
+                    for gate_record in gate_records
+                )
+                or payload.get("test_exit_code") != 0
+                or payload.get("commit_created") is not True
+                or payload.get("final_commit") != run_record.final_commit
+            ):
+                raise ValueError("PASS evidence is missing a verified Gate or Git result")
         return payload
 
     def finalize_run(self, session: Session, run_id: str) -> RunRecord:
@@ -544,8 +648,20 @@ class LocalCodingAgent:
     ) -> None:
         ExecutionLifecycle.transition_task(task_record, next_status)
 
-    def _authorize(self, action: str, gate_id: str) -> None:
-        result = self.policy_engine.evaluate(action)
+    def _authorize(
+        self,
+        action: str,
+        gate_id: str,
+        checks: dict[str, bool | None | GateStatus],
+    ) -> None:
+        passed_gates = {
+            check_id for check_id, passed in checks.items() if passed is True
+        }
+        result = self.policy_engine.evaluate(
+            action,
+            capabilities=self.capabilities(),
+            passed_gates=passed_gates,
+        )
         if not result.allowed:
             raise AgentRunFailure(
                 f"policy denied action '{action}': {result.reason}",

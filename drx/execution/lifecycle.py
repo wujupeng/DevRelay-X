@@ -26,5 +26,5 @@ class ExecutionLifecycle:
             task_record.title,
             TaskStatus(task_record.status),
         )
-        transition_task(task, next_status)
-        task_record.status = task.status.value
+        transitioned = transition_task(task, next_status)
+        task_record.status = transitioned.status.value

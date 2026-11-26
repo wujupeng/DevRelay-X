@@ -6,13 +6,16 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from drx.agent.config import TestConfig
 from drx.agent.local import LocalCodingAgent
 from drx.agent.run import AgentRunState
+from drx.evidence.test import TestEvidence
+from drx.git.service import GitService
 from drx.models.evidence import EvidenceRecord
 from drx.models.project import ProjectRecord
 from drx.models.requirement import RequirementRecord
@@ -73,6 +76,19 @@ class FailingFixtureRuntime(FixtureRuntime):
         )
 
 
+class CrashingFixtureRuntime(FixtureRuntime):
+    def generate(self, prompt: str) -> str:
+        raise RuntimeError("simulated model generation failure")
+
+
+def _allow_high_risk_actions() -> PolicyEngine:
+    return PolicyEngine(
+        allowed_actions=(
+            PolicyEngine.DEFAULT_ALLOWED_ACTIONS | PolicyEngine.HIGH_RISK_ACTIONS
+        )
+    )
+
+
 def test_policy_denial_prevents_runtime_generation(
     tmp_path: Path, database_session: Session
 ) -> None:
@@ -101,6 +117,24 @@ def test_policy_denial_prevents_runtime_generation(
     assert "policy denied action 'runtime.generate'" in result.evidence["failure_reason"]
     assert not runtime.generate_called
     assert database_session.get(TaskRecord, "calculator-task").status == "blocked"
+
+
+def test_database_rejects_task_state_transition_bypass(
+    tmp_path: Path, database_session: Session
+) -> None:
+    _create_task(database_session, tmp_path / "calculator")
+
+    with pytest.raises(IntegrityError, match="illegal or unverified Task status transition"):
+        database_session.execute(
+            text("UPDATE tasks SET status = 'pass' WHERE id = 'calculator-task'")
+        )
+    database_session.rollback()
+
+    with pytest.raises(IntegrityError, match="illegal or unverified Task status transition"):
+        database_session.execute(
+            text("UPDATE tasks SET status = 'implemented' WHERE id = 'calculator-task'")
+        )
+    database_session.rollback()
 
 
 @pytest.fixture
@@ -188,6 +222,7 @@ def test_task_to_agent_run_evidence_and_gate(tmp_path: Path, database_session: S
             tmp_path / "workspaces", control_repository=tmp_path / "control"
         ),
         test_config=TestConfig(framework="pytest"),
+        policy_engine=_allow_high_risk_actions(),
     )
     result = agent.execute(database_session, "calculator-task")
 
@@ -221,6 +256,7 @@ def test_task_to_agent_run_evidence_and_gate(tmp_path: Path, database_session: S
     assert run is not None and run.status == "completed"
     assert run.final_commit == result.evidence["final_commit"]
     assert evidence.result == "pass"
+    assert agent.collect_evidence(database_session, result) == result.evidence
 
 
 def test_runtime_unavailable_is_persisted_as_blocked(
@@ -263,6 +299,7 @@ def test_real_test_failure_fails_gate_and_task(
             tmp_path / "workspaces", control_repository=tmp_path / "control"
         ),
         test_config=TestConfig(framework="pytest"),
+        policy_engine=_allow_high_risk_actions(),
     )
 
     result = agent.execute(database_session, "calculator-task")
@@ -274,6 +311,135 @@ def test_real_test_failure_fails_gate_and_task(
         "status"
     ] == "fail"
     assert database_session.get(TaskRecord, "calculator-task").status == "fail"
+
+
+def test_workspace_changes_during_tests_block_commit(
+    tmp_path: Path,
+    database_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "calculator"
+    shutil.copytree(Path(__file__).parents[1] / "fixtures" / "calculator", repository)
+    _make_git_repository(repository)
+    _create_task(database_session, repository)
+    agent = LocalCodingAgent(
+        agent_id="local-agent-001",
+        name="Local Coding Agent",
+        runtime=FixtureRuntime(),
+        workspace_manager=WorkspaceManager(
+            tmp_path / "workspaces", control_repository=tmp_path / "control"
+        ),
+        test_config=TestConfig(framework="pytest"),
+        policy_engine=_allow_high_risk_actions(),
+    )
+    run_tests = agent.test_runner.run
+
+    def mutate_workspace_after_tests(workspace: Path) -> TestEvidence:
+        result = run_tests(workspace)
+        (workspace / "test-side-effect.py").write_text("changed after tests\n")
+        return result
+
+    monkeypatch.setattr(agent.test_runner, "run", mutate_workspace_after_tests)
+    result = agent.execute(database_session, "calculator-task")
+
+    assert result.state is AgentRunState.FAILED
+    assert result.gate_decision == "blocked"
+    assert result.evidence["test_exit_code"] == 0
+    assert result.evidence["commit_created"] is False
+    assert "workspace changed during test execution" in result.evidence["failure_reason"]
+    assert "test-side-effect.py" in result.evidence["changed_files"]
+    assert database_session.get(TaskRecord, "calculator-task").status == "blocked"
+
+
+def test_runtime_generation_error_is_persisted_as_failed(
+    tmp_path: Path, database_session: Session
+) -> None:
+    repository = tmp_path / "calculator"
+    shutil.copytree(Path(__file__).parents[1] / "fixtures" / "calculator", repository)
+    _make_git_repository(repository)
+    _create_task(database_session, repository)
+    agent = LocalCodingAgent(
+        agent_id="local-agent-001",
+        name="Local Coding Agent",
+        runtime=CrashingFixtureRuntime(),
+        workspace_manager=WorkspaceManager(
+            tmp_path / "workspaces", control_repository=tmp_path / "control"
+        ),
+        policy_engine=_allow_high_risk_actions(),
+    )
+
+    result = agent.execute(database_session, "calculator-task")
+
+    assert result.state is AgentRunState.FAILED
+    assert result.gate_decision == "blocked"
+    assert result.evidence["failure_reason"] == "model runtime failed during generation"
+    assert database_session.get(TaskRecord, "calculator-task").status == "blocked"
+    assert database_session.get(RunRecord, result.run_id).status == "failed"
+
+
+def test_git_commit_error_fails_gate_and_task(
+    tmp_path: Path,
+    database_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "calculator"
+    shutil.copytree(Path(__file__).parents[1] / "fixtures" / "calculator", repository)
+    _make_git_repository(repository)
+    _create_task(database_session, repository)
+
+    def fail_commit(_service: GitService, _message: str) -> str:
+        raise RuntimeError("simulated Git commit failure")
+
+    monkeypatch.setattr(GitService, "commit", fail_commit)
+    agent = LocalCodingAgent(
+        agent_id="local-agent-001",
+        name="Local Coding Agent",
+        runtime=FixtureRuntime(),
+        workspace_manager=WorkspaceManager(
+            tmp_path / "workspaces", control_repository=tmp_path / "control"
+        ),
+        test_config=TestConfig(framework="pytest"),
+        policy_engine=_allow_high_risk_actions(),
+    )
+
+    result = agent.execute(database_session, "calculator-task")
+
+    assert result.state is AgentRunState.FAILED
+    assert result.gate_decision == "fail"
+    assert result.evidence["commit_created"] is False
+    assert "local workspace commit failed" in result.evidence["failure_reason"]
+    assert next(
+        gate for gate in result.evidence["gate_results"] if gate["id"] == "G5_GIT"
+    )["status"] == "fail"
+    assert database_session.get(TaskRecord, "calculator-task").status == "fail"
+
+
+def test_tampered_persisted_evidence_is_not_returned_as_pass(
+    tmp_path: Path, database_session: Session
+) -> None:
+    repository = tmp_path / "calculator"
+    shutil.copytree(Path(__file__).parents[1] / "fixtures" / "calculator", repository)
+    _make_git_repository(repository)
+    _create_task(database_session, repository)
+    agent = LocalCodingAgent(
+        agent_id="local-agent-001",
+        name="Local Coding Agent",
+        runtime=FixtureRuntime(),
+        workspace_manager=WorkspaceManager(
+            tmp_path / "workspaces", control_repository=tmp_path / "control"
+        ),
+        test_config=TestConfig(framework="pytest"),
+        policy_engine=_allow_high_risk_actions(),
+    )
+    result = agent.execute(database_session, "calculator-task")
+    evidence = database_session.scalars(
+        select(EvidenceRecord).where(EvidenceRecord.run_id == result.run_id)
+    ).one()
+    evidence.metadata_json = "{}"
+    database_session.commit()
+
+    with pytest.raises(ValueError, match="do not match"):
+        agent.collect_evidence(database_session, result)
 
 
 def test_missing_acceptance_criteria_blocks_task(
