@@ -8,6 +8,10 @@ Workspace clones live outside the control repository by default. Cleanup is
 explicit and only removes a managed direct child with its ownership marker.
 Agent-created workspaces are retained by default for human review.
 
+For a local, non-mutating host report, use `drx node readiness`; see the
+[Debian node readiness guide](../deployment/readiness.md). It does not probe a
+remote node or run a model.
+
 ## Troubleshooting
 
 - Ensure Git is on `PATH` and the configured repository is cloneable.

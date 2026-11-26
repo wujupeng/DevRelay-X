@@ -1,0 +1,25 @@
+[Unit]
+Description=DevRelay-X local health API
+After=network.target
+
+[Service]
+Type=simple
+User=devrelay
+Group=devrelay
+WorkingDirectory=/opt/devrelay-x
+ExecStart=/opt/devrelay-x/.venv/bin/uvicorn drx.api:app --host 127.0.0.1 --port 8010
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from drx.agent.config import load_config
 from drx.agent.local import LocalCodingAgent
+from drx.deployment.readiness import ModelMemoryProfile, create_readiness_report
 from drx.hardware import discover_node_hardware
 from drx.models.agent import AgentRecord
 from drx.models.evidence import EvidenceRecord
@@ -89,6 +92,78 @@ def node_health() -> None:
             },
             indent=2,
         )
+    )
+
+
+@node_app.command("readiness")
+def node_readiness(
+    node_id: Annotated[str, typer.Option("--node-id")] = "unassigned",
+    config_path: Annotated[Path | None, typer.Option("--config")] = None,
+    model_profile_path: Annotated[
+        Path | None, typer.Option("--model-profile")
+    ] = None,
+    workspace_root: Annotated[Path | None, typer.Option("--workspace-root")] = None,
+    control_repository: Annotated[
+        Path | None, typer.Option("--control-repository")
+    ] = None,
+    output_path: Annotated[Path | None, typer.Option("--output")] = None,
+    minimum_ram_gib: Annotated[
+        float | None, typer.Option("--minimum-ram-gib", min=0)
+    ] = None,
+    minimum_disk_gib: Annotated[
+        float | None, typer.Option("--minimum-disk-gib", min=0)
+    ] = None,
+) -> None:
+    """Create a read-only readiness report; never installs or starts services."""
+    app_config = None
+    if config_path is not None:
+        try:
+            app_config = load_config(config_path)
+        except (OSError, ValueError, ValidationError, yaml.YAMLError) as error:
+            raise typer.BadParameter("application configuration is invalid") from error
+    if workspace_root is None and app_config is not None:
+        workspace_root = app_config.workspace.root
+
+    profile = None
+    if model_profile_path is not None:
+        try:
+            raw_profile = yaml.safe_load(
+                model_profile_path.read_text(encoding="utf-8")
+            )
+            profile = ModelMemoryProfile.model_validate(raw_profile)
+        except (OSError, yaml.YAMLError, ValidationError) as error:
+            raise typer.BadParameter("model profile is missing or invalid") from error
+
+    report = create_readiness_report(
+        node_id=node_id,
+        workspace_root=workspace_root,
+        control_repository=control_repository or Path.cwd(),
+        model_profile=profile,
+        runtime_configured=app_config is not None,
+        config_path=config_path,
+        minimum_ram_bytes=(
+            round(minimum_ram_gib * 1024**3)
+            if minimum_ram_gib is not None
+            else None
+        ),
+        minimum_disk_bytes=(
+            round(minimum_disk_gib * 1024**3)
+            if minimum_disk_gib is not None
+            else None
+        ),
+    )
+    serialized = json.dumps(report, indent=2, ensure_ascii=True)
+    if output_path is None:
+        typer.echo(serialized)
+        return
+    try:
+        with output_path.open("x", encoding="utf-8") as evidence_file:
+            evidence_file.write(serialized + "\n")
+    except OSError as error:
+        raise typer.BadParameter(f"cannot create readiness evidence file: {output_path}") from error
+    typer.echo(
+        f"Readiness evidence saved to {output_path} "
+        f"(sha256: {report['evidence_sha256']})"
     )
 
 

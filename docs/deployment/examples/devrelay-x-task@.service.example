@@ -1,0 +1,26 @@
+[Unit]
+Description=DevRelay-X one-shot Agent task %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=devrelay
+Group=devrelay
+WorkingDirectory=/var/lib/devrelay-x
+ExecStart=/opt/devrelay-x/.venv/bin/drx agent run %i --config /etc/devrelay-x/config.yaml
+Restart=no
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/devrelay-x /srv/devrelay-x/workspaces
+
+# Do not enable PrivateDevices for a GPU runtime. Device access and network
+# egress must be reviewed and restricted for the actual host before installation.
