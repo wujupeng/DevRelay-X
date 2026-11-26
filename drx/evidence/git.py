@@ -46,6 +46,13 @@ class GitEvidenceCollector:
 
     def apply_patch(self, patch: str) -> None:
         patch = patch.replace("\r\n", "\n").replace("\r", "\n")
+        lines = patch.strip().splitlines()
+        if (
+            len(lines) >= 3
+            and lines[0].strip().lower() == "```diff"
+            and lines[-1].strip() == "```"
+        ):
+            patch = "\n".join(lines[1:-1]).strip() + "\n"
         if not patch.startswith(("diff --git ", "--- ")):
             raise ValueError("runtime output is not a unified Git diff")
         for line in patch.splitlines():
@@ -67,8 +74,10 @@ class GitEvidenceCollector:
             if raw_path == "/dev/null":
                 continue
             self._validate_path(raw_path)
-        self._run_input(["apply", "--ignore-whitespace", "--check", "--"], patch)
-        self._run_input(["apply", "--ignore-whitespace", "--"], patch)
+        self._run_input(
+            ["apply", "--recount", "--ignore-whitespace", "--check", "--"], patch
+        )
+        self._run_input(["apply", "--recount", "--ignore-whitespace", "--"], patch)
 
     def _validate_path(self, raw_path: str) -> None:
         if raw_path.startswith('"'):

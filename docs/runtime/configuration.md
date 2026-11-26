@@ -11,4 +11,6 @@ and never writes model configuration into evidence except the configured model I
 
 `drx runtime list` prints the configured identity. `drx runtime health` checks
 connectivity; a successful health request does not guarantee generation works.
-Generation output must be a valid workspace-relative unified diff.
+Generation output must be a valid workspace-relative unified diff. A complete,
+single `diff` Markdown fence is accepted and stripped. Git recalculates incorrect
+hunk counts, then normal path, symlink and secret-file validation runs.

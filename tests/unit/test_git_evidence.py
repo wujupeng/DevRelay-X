@@ -7,7 +7,7 @@ from drx.evidence.git import GitEvidenceCollector
 from drx.git.service import GitService
 
 
-def _init_repository(path: Path) -> str:
+def _init_repository(path: Path, content: str = "value = 1\n") -> str:
     path.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "DevRelay test"], cwd=path, check=True)
@@ -16,7 +16,7 @@ def _init_repository(path: Path) -> str:
         cwd=path,
         check=True,
     )
-    (path / "source.py").write_text("value = 1\n", encoding="utf-8")
+    (path / "source.py").write_text(content, encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=path, check=True)
     subprocess.run(["git", "commit", "-m", "fixture"], cwd=path, check=True, capture_output=True)
     return subprocess.run(
@@ -43,12 +43,60 @@ def test_git_diff_is_applied_and_collected(tmp_path: Path) -> None:
     assert "+value = 2" in evidence.diff
 
 
+def test_git_diff_accepts_a_complete_markdown_diff_fence(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    _init_repository(
+        repository,
+        "def add(left: int, right: int) -> int:\n"
+        "    return None\n"
+        "\n"
+        "def subtract(left: int, right: int) -> int:\n"
+        "    return None\n",
+    )
+    collector = GitEvidenceCollector(repository)
+    patch = (
+        "```diff\n"
+        "diff --git a/source.py b/source.py\n"
+        "index 1234567..89abcdef 100644\n"
+        "--- a/source.py\n"
+        "+++ b/source.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " def add(left: int, right: int) -> int:\n"
+        "-    return None\n"
+        "+    return left + right\n"
+        "\n"
+        " def subtract(left: int, right: int) -> int:\n"
+        "-    return None\n"
+        "+    return left - right\n"
+        "```\n"
+    )
+
+    collector.apply_patch(patch)
+
+    assert (repository / "source.py").read_text(encoding="utf-8") == (
+        "def add(left: int, right: int) -> int:\n"
+        "    return left + right\n"
+        "\n"
+        "def subtract(left: int, right: int) -> int:\n"
+        "    return left - right\n"
+    )
+
+
 def test_git_diff_rejects_secret_files_and_path_traversal(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     _init_repository(repository)
     collector = GitEvidenceCollector(repository)
     with pytest.raises(PermissionError):
         collector.apply_patch("--- a/../outside.txt\n+++ b/../outside.txt\n")
+    with pytest.raises(PermissionError):
+        collector.apply_patch(
+            "```diff\n"
+            "--- a/../outside.txt\n"
+            "+++ b/../outside.txt\n"
+            "@@ -0,0 +1 @@\n"
+            "+outside\n"
+            "```\n"
+        )
     with pytest.raises(PermissionError):
         collector.apply_patch("--- /dev/null\n+++ b/.env\n")
 
