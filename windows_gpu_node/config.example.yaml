@@ -1,0 +1,19 @@
+node_id: Node-002
+bind_host: 127.0.0.1
+port: 8765
+allowed_sources:
+  - 127.0.0.1/32
+  - ::1/128
+token_env_var: DRX_GPU_NODE_TOKEN
+tls_cert_file: null
+tls_key_file: null
+log_file: "%LOCALAPPDATA%/DevRelayX/WindowsGpuNode/logs/agent.log"
+log_max_bytes: 5242880
+log_backup_count: 5
+max_queue_size: 8
+max_request_bytes: 65536
+max_prompt_chars: 32000
+max_system_prompt_chars: 4000
+max_job_timeout_seconds: 300
+mock_model_id: mock-only-v1
+mock_delay_seconds: 0.05

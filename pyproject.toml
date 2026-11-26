@@ -27,9 +27,10 @@ dev = [
 
 [project.scripts]
 drx = "drx.cli.main:app"
+windows-gpu-node = "windows_gpu_node.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["drx"]
+packages = ["drx", "windows_gpu_node"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
