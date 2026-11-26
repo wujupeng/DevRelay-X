@@ -1,0 +1,11 @@
+endpoint: https://192.168.2.85:8765
+ca_bundle_file: /etc/devrelay-x/windows-gpu-node/trusted-ca.pem
+token_env_var: DRX_REMOTE_GPU_NODE_TOKEN
+expected_node_id: Node-002
+model_id: mock-only-v1
+connect_timeout_seconds: 5
+read_timeout_seconds: 10
+write_timeout_seconds: 15
+pool_timeout_seconds: 5
+poll_interval_seconds: 0.25
+job_timeout_seconds: 300

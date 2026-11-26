@@ -42,10 +42,41 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     }
 }
 
-& $venvPython -m pip install $projectRoot
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not install WindowsGpuNode and its declared Python dependencies."
+$uvCommand = Get-Command uv.exe -ErrorAction SilentlyContinue
+if ($null -eq $uvCommand) {
+    throw "uv is required to install locked dependencies. Install uv separately, then rerun this script."
 }
+if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "uv.lock") -PathType Leaf)) {
+    throw "uv.lock is missing; refusing an unlocked dependency installation."
+}
+$previousUvEnvironment = [Environment]::GetEnvironmentVariable("UV_PROJECT_ENVIRONMENT", "Process")
+try {
+    [Environment]::SetEnvironmentVariable(
+        "UV_PROJECT_ENVIRONMENT",
+        (Join-Path $InstallDir ".venv"),
+        "Process"
+    )
+    & $uvCommand.Source sync --project $projectRoot --frozen --no-dev --python $PythonExe
+}
+finally {
+    [Environment]::SetEnvironmentVariable(
+        "UV_PROJECT_ENVIRONMENT",
+        $previousUvEnvironment,
+        "Process"
+    )
+}
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not install WindowsGpuNode from the committed uv.lock."
+}
+$gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+if ($null -eq $gitCommand) {
+    throw "Git is required to record the installed Agent commit."
+}
+$commitSha = & $gitCommand.Source -C $projectRoot rev-parse HEAD
+if ($LASTEXITCODE -ne 0 -or $commitSha -notmatch "^[0-9a-f]{40}$") {
+    throw "Could not determine the checked-out Agent commit SHA."
+}
+$commitSha | Set-Content -LiteralPath (Join-Path $InstallDir "agent.commit") -NoNewline
 
 $configPath = Join-Path $InstallDir "config.yaml"
 if (-not (Test-Path -LiteralPath $configPath)) {
@@ -78,6 +109,7 @@ New-Item -ItemType Directory -Path (Join-Path $InstallDir "logs") -Force | Out-N
 Write-Output "WindowsGpuNode installed for the current standard user."
 Write-Output "Install directory: $InstallDir"
 Write-Output "Configuration: $configPath"
+Write-Output "Agent commit: $commitSha"
 Write-Output "Bearer token stored with user-only read permissions: $tokenPath"
 Write-Output "The service remains loopback-only and uses Mock Runtime."
 

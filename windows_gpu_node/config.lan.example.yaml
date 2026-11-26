@@ -1,0 +1,21 @@
+node_id: Node-002
+bind_host: 192.168.2.85
+enable_lan_access: true
+port: 8765
+allowed_sources:
+  - 192.168.2.3/32
+token_env_var: DRX_GPU_NODE_TOKEN
+tls_cert_file: "%LOCALAPPDATA%/DevRelayX/WindowsGpuNode/certs/agent.crt"
+tls_key_file: "%LOCALAPPDATA%/DevRelayX/WindowsGpuNode/certs/agent.key"
+log_file: "%LOCALAPPDATA%/DevRelayX/WindowsGpuNode/logs/agent.log"
+log_max_bytes: 5242880
+log_backup_count: 5
+rate_limit_requests: 600
+rate_limit_window_seconds: 60
+max_queue_size: 8
+max_request_bytes: 65536
+max_prompt_chars: 32000
+max_system_prompt_chars: 4000
+max_job_timeout_seconds: 300
+mock_model_id: mock-only-v1
+mock_delay_seconds: 2

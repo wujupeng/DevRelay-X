@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath $startScript -PathType Leaf)) {
 $powerShell = Join-Path $PSHOME "powershell.exe"
 $action = New-ScheduledTaskAction `
     -Execute $powerShell `
-    -Argument ('-NoProfile -ExecutionPolicy Bypass -File "' + $startScript + '" -InstallDir "' + $InstallDir + '"')
+    -Argument ('-NoProfile -File "' + $startScript + '" -InstallDir "' + $InstallDir + '"')
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $taskPrincipal = New-ScheduledTaskPrincipal `
     -UserId $identity.Name `

@@ -58,4 +58,4 @@ finally {
     $headers = $null
 }
 
-Write-Output "WindowsGpuNode is healthy (PID $agentPid, state $($health.state), mock_only=$($health.mock_only))."
+Write-Output "WindowsGpuNode is healthy (PID $agentPid, commit $($health.agent_commit_sha), state $($health.state), mock_only=$($health.mock_only))."

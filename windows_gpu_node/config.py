@@ -12,6 +12,7 @@ class NodeConfig(BaseModel):
 
     node_id: str = Field(default="Node-002", min_length=1, max_length=64)
     bind_host: str = "127.0.0.1"
+    enable_lan_access: bool = False
     port: int = Field(default=8765, ge=1024, le=65535)
     allowed_sources: list[str] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
@@ -22,6 +23,8 @@ class NodeConfig(BaseModel):
     log_file: Path = Path("logs/windows-gpu-node.log")
     log_max_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
     log_backup_count: int = Field(default=5, ge=1, le=20)
+    rate_limit_requests: int = Field(default=120, ge=1, le=10_000)
+    rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
     max_queue_size: int = Field(default=8, ge=1, le=128)
     max_request_bytes: int = Field(default=64 * 1024, ge=1024, le=1024 * 1024)
     max_prompt_chars: int = Field(default=32_000, ge=1, le=64_000)
@@ -32,14 +35,23 @@ class NodeConfig(BaseModel):
 
     @field_validator("bind_host")
     @classmethod
-    def require_loopback_bind_host(cls, value: str) -> str:
+    def require_ip_bind_host(cls, value: str) -> str:
         try:
             address = ipaddress.ip_address(value)
         except ValueError as error:
-            raise ValueError("bind_host must be a loopback IP address") from error
-        if not address.is_loopback:
-            raise ValueError("LAN binding is disabled in this release")
+            raise ValueError("bind_host must be an IP address") from error
+        if address.is_unspecified:
+            raise ValueError(
+                "bind_host must be a specific interface IP, not an unspecified address"
+            )
         return str(address)
+
+    @field_validator("port")
+    @classmethod
+    def reserve_ollama_port(cls, value: int) -> int:
+        if value == 11434:
+            raise ValueError("Agent port must not use the Ollama API port 11434")
+        return value
 
     @field_validator("allowed_sources")
     @classmethod
@@ -65,9 +77,25 @@ class NodeConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def require_tls_pair(self) -> "NodeConfig":
+    def validate_network_exposure(self) -> "NodeConfig":
         if (self.tls_cert_file is None) != (self.tls_key_file is None):
             raise ValueError("tls_cert_file and tls_key_file must be configured together")
+        bind_address = ipaddress.ip_address(self.bind_host)
+        if bind_address.is_loopback:
+            if self.enable_lan_access:
+                raise ValueError("enable_lan_access requires a non-loopback bind_host")
+            return self
+        if not self.enable_lan_access:
+            raise ValueError("LAN binding requires enable_lan_access=true")
+        if bind_address.version != 4 or not bind_address.is_private:
+            raise ValueError("LAN binding must use a private IPv4 interface address")
+        if self.tls_cert_file is None or self.tls_key_file is None:
+            raise ValueError("LAN binding requires TLS certificate and key files")
+        if len(self.allowed_sources) != 1:
+            raise ValueError("LAN binding requires exactly one authorized source IP")
+        source = ipaddress.ip_network(self.allowed_sources[0])
+        if source.version != 4 or not source.network_address.is_private:
+            raise ValueError("LAN binding requires one private IPv4 source address")
         return self
 
     def permits_source(self, address: str | None) -> bool:

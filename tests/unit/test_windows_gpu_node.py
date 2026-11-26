@@ -92,9 +92,19 @@ def test_agent_starts_serves_health_and_stops_cleanly() -> None:
         assert response.status_code == 200
         assert response.json()["state"] == "ONLINE"
         assert response.json()["mock_only"] is True
+        assert response.json()["agent_commit_sha"] == "unknown"
 
     assert manager._worker is not None
     assert manager._worker.done()
+
+
+def test_health_reports_installed_agent_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    commit_sha = "a" * 40
+    monkeypatch.setenv("DRX_GPU_NODE_COMMIT_SHA", commit_sha)
+    with build_client(build_app()) as client:
+        response = client.get("/api/v1/health", headers=headers())
+    assert response.status_code == 200
+    assert response.json()["agent_commit_sha"] == commit_sha
 
 
 @pytest.mark.parametrize(
@@ -134,6 +144,16 @@ def test_source_outside_allowlist_is_forbidden() -> None:
     with TestClient(application, client=("192.168.2.3", 12345)) as client:
         response = client.get("/api/v1/health", headers=headers())
     assert response.status_code == 403
+
+
+def test_authenticated_source_is_rate_limited() -> None:
+    config = NodeConfig(rate_limit_requests=1, rate_limit_window_seconds=60)
+    with build_client(build_app(config=config)) as client:
+        first = client.get("/api/v1/health", headers=headers())
+        limited = client.get("/api/v1/health", headers=headers())
+    assert first.status_code == 200
+    assert limited.status_code == 429
+    assert limited.json() == {"detail": "Request rate limit exceeded"}
 
 
 def test_capabilities_report_unavailable_gpu_ollama_and_toolkit_as_such() -> None:
@@ -373,7 +393,38 @@ def test_short_or_missing_token_fails_closed() -> None:
 
 
 def test_node_config_rejects_lan_binding_and_incomplete_tls() -> None:
-    with pytest.raises(ValueError, match="LAN binding is disabled"):
+    with pytest.raises(ValueError, match="requires enable_lan_access"):
         NodeConfig(bind_host="192.168.2.85")
+    with pytest.raises(ValueError, match="specific interface IP"):
+        NodeConfig(bind_host="0.0.0.0")
+    with pytest.raises(ValueError, match="must not use the Ollama API port"):
+        NodeConfig(port=11434)
     with pytest.raises(ValueError, match="must be configured together"):
         NodeConfig(tls_cert_file="certificate.pem")
+
+
+def test_node_config_lan_exposure_requires_explicit_opt_in_tls_and_remote_allowlist() -> None:
+    with pytest.raises(ValueError, match="requires TLS certificate and key files"):
+        NodeConfig(
+            bind_host="192.168.2.85",
+            enable_lan_access=True,
+            allowed_sources=["192.168.2.3/32"],
+        )
+    with pytest.raises(ValueError, match="exactly one authorized source IP"):
+        NodeConfig(
+            bind_host="192.168.2.85",
+            enable_lan_access=True,
+            allowed_sources=["192.168.2.3/32", "192.168.2.4/32"],
+            tls_cert_file="agent.crt",
+            tls_key_file="agent.key",
+        )
+    config = NodeConfig(
+        bind_host="192.168.2.85",
+        enable_lan_access=True,
+        allowed_sources=["192.168.2.3/32"],
+        tls_cert_file="agent.crt",
+        tls_key_file="agent.key",
+    )
+    assert config.bind_host == "192.168.2.85"
+    assert config.permits_source("192.168.2.3")
+    assert not config.permits_source("192.168.2.4")

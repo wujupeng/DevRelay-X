@@ -1,5 +1,6 @@
 node_id: Node-002
 bind_host: 127.0.0.1
+enable_lan_access: false
 port: 8765
 allowed_sources:
   - 127.0.0.1/32
@@ -10,6 +11,8 @@ tls_key_file: null
 log_file: "%LOCALAPPDATA%/DevRelayX/WindowsGpuNode/logs/agent.log"
 log_max_bytes: 5242880
 log_backup_count: 5
+rate_limit_requests: 120
+rate_limit_window_seconds: 60
 max_queue_size: 8
 max_request_bytes: 65536
 max_prompt_chars: 32000

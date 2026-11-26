@@ -7,9 +7,10 @@ $InstallDir = (Resolve-Path -LiteralPath $InstallDir).Path
 $python = Join-Path $InstallDir ".venv\Scripts\python.exe"
 $configPath = Join-Path $InstallDir "config.yaml"
 $tokenPath = Join-Path $InstallDir "agent.token"
+$commitPath = Join-Path $InstallDir "agent.commit"
 $pidPath = Join-Path $InstallDir "agent.pid"
 
-foreach ($requiredPath in @($python, $configPath, $tokenPath)) {
+foreach ($requiredPath in @($python, $configPath, $tokenPath, $commitPath)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Required installation file is missing: $requiredPath"
     }
@@ -44,12 +45,17 @@ $tokenEnvVar = & $python -c "from windows_gpu_node.config import load_config; im
 if ($LASTEXITCODE -ne 0 -or $tokenEnvVar -notmatch "^[A-Z_][A-Z0-9_]*$") {
     throw "Could not read the configured token environment-variable name."
 }
+$commitSha = (Get-Content -LiteralPath $commitPath -Raw).Trim()
+if ($commitSha -notmatch "^[0-9a-f]{40}$") {
+    throw "The recorded Agent commit SHA is invalid."
+}
 $port = & $python -c "from windows_gpu_node.config import load_config; import sys; print(load_config(sys.argv[1]).port)" $configPath
 if ($LASTEXITCODE -ne 0 -or $port -notmatch "^\d+$") {
     throw "Could not read the configured Agent port."
 }
 
 $previousToken = [Environment]::GetEnvironmentVariable($tokenEnvVar, "Process")
+$previousCommit = [Environment]::GetEnvironmentVariable("DRX_GPU_NODE_COMMIT_SHA", "Process")
 $logDir = Join-Path $InstallDir "logs"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $logStamp = (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N")
@@ -59,6 +65,7 @@ $arguments = '-m windows_gpu_node --config "' + $configPath + '"'
 
 try {
     [Environment]::SetEnvironmentVariable($tokenEnvVar, $token, "Process")
+    [Environment]::SetEnvironmentVariable("DRX_GPU_NODE_COMMIT_SHA", $commitSha, "Process")
     $process = Start-Process `
         -FilePath $python `
         -ArgumentList $arguments `
@@ -88,7 +95,11 @@ try {
 }
 finally {
     [Environment]::SetEnvironmentVariable($tokenEnvVar, $previousToken, "Process")
+    [Environment]::SetEnvironmentVariable("DRX_GPU_NODE_COMMIT_SHA", $previousCommit, "Process")
     $token = $null
 }
 
-Write-Output "WindowsGpuNode is healthy (PID $($process.Id), state $($health.state), mock_only=$($health.mock_only))."
+if ($health.agent_commit_sha -ne $commitSha) {
+    throw "Agent health response commit SHA did not match the installed commit."
+}
+Write-Output "WindowsGpuNode is healthy (PID $($process.Id), commit $commitSha, state $($health.state), mock_only=$($health.mock_only))."

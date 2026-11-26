@@ -1,5 +1,8 @@
 import hmac
 import logging
+import os
+import time
+from collections import deque
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -93,6 +96,7 @@ class BearerAndSourceMiddleware:
         self.app = app
         self.config = config
         self.token = token
+        self._request_times: dict[str, deque[float]] = {}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -101,9 +105,19 @@ class BearerAndSourceMiddleware:
 
         client = scope.get("client")
         source_address = client[0] if client else None
-        if not self.config.permits_source(source_address):
+        if source_address is None or not self.config.permits_source(source_address):
             await _json_error(send, 403, "Source address is not allowed")
             return
+
+        now = time.monotonic()
+        request_times = self._request_times.setdefault(source_address, deque())
+        cutoff = now - self.config.rate_limit_window_seconds
+        while request_times and request_times[0] <= cutoff:
+            request_times.popleft()
+        if len(request_times) >= self.config.rate_limit_requests:
+            await _json_error(send, 429, "Request rate limit exceeded")
+            return
+        request_times.append(now)
 
         headers = dict(scope.get("headers", []))
         raw_authorization = headers.get(b"authorization", b"")
@@ -135,6 +149,7 @@ def create_app(
 
     mock_runtime = runtime or MockRuntime(delay_seconds=config.mock_delay_seconds)
     jobs = JobManager(config, mock_runtime)
+    build_commit_sha = os.environ.get("DRX_GPU_NODE_COMMIT_SHA", "unknown")
     started_at: datetime | None = None
     capabilities: dict[str, Any] = {}
 
@@ -177,6 +192,7 @@ def create_app(
             "status": "ok",
             "node_id": config.node_id,
             "agent_version": __version__,
+            "agent_commit_sha": build_commit_sha,
             "state": jobs.state,
             "mock_only": True,
             "started_at": started_at.isoformat() if started_at else None,
@@ -187,6 +203,7 @@ def create_app(
         return {
             "node_id": config.node_id,
             "agent_version": __version__,
+            "agent_commit_sha": build_commit_sha,
             "mock_only": True,
             "inference_backend": "mock",
             "max_concurrent_jobs": 1,

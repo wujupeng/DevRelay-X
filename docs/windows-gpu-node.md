@@ -16,20 +16,23 @@ Run PowerShell as the intended standard Windows user, not as Administrator:
 .\scripts\windows_gpu_node\Stop-WindowsGpuNode.ps1
 ```
 
-The installer requires Python 3.12 or later and installs the project into a
-private venv under `%LOCALAPPDATA%\DevRelayX\WindowsGpuNode`. It does not install
-Python; `pip` installs the project's declared package dependencies and may need
-network access. No model is downloaded. The installer creates a random Bearer
-token in `agent.token`, restricts that file to the current user, and does not
-print or log the token. Preserve the token securely; do not copy it into issue
-reports or logs. `config.yaml` is created from the example only once so an
-upgrade does not overwrite local settings.
+The installer requires Python 3.12 or later and `uv` already available on PATH.
+It installs the project into a private venv under
+`%LOCALAPPDATA%\DevRelayX\WindowsGpuNode` from the committed `uv.lock` using
+frozen, no-dev synchronization. It does not install Python or uv. Dependency
+downloads may require network access; no model is downloaded. The installer
+creates a random Bearer token in `agent.token`, restricts that file to the
+current user, and does not print or log the token. Preserve the token securely;
+do not copy it into issue reports or logs. `config.yaml` is created from the
+example only once so an upgrade does not overwrite local settings.
 
 The default address is `127.0.0.1:8765`; LAN binding is rejected by config
 validation. All endpoints require a Bearer token and an allowed source address.
-TLS certificate/key settings are supported by the CLI, but TLS is not needed
-for loopback-only use. Do not change the bind address or open a firewall port in
-P1.
+For explicitly authorized cross-host testing only, the separate LAN example
+requires all three settings: a specific non-loopback bind IP, `enable_lan_access:
+true`, a single-host non-loopback source allowlist, and a TLS certificate/key
+pair. Binding to `0.0.0.0`, a subnet-wide allowlist, or cleartext LAN HTTP is
+rejected. The default configuration remains loopback-only.
 
 To start on machine boot without storing a password, opt in explicitly:
 
@@ -51,6 +54,23 @@ starts the Agent. Save the two status outputs and task history as evidence.
 These checks must be performed on the target Windows host; local unit tests do
 not prove RDP-disconnect behavior.
 
+## Authorized Debian cross-host test (P1.5)
+
+The separate deployment and test checklist is in
+[remote GPU node acceptance](./remote-gpu-node-acceptance.md). Use an
+organization-approved certificate authority to issue a server certificate
+whose subject alternative name includes `IP:192.168.2.85`. Keep the private key
+on Windows and provide Debian only the issuing CA certificate/chain. Do not
+disable client certificate verification or use a self-signed leaf certificate
+without an approved trust procedure.
+
+`Set-WindowsGpuNodeFirewall.ps1` is the only script in this package that
+requires elevation. It creates one TCP allow rule restricted to the configured
+Debian source IP, Windows local IP, Agent port, executable, and Domain/Private
+profiles; `-Remove` is its rollback. It does not create an Ollama rule. The
+Windows Agent must separately be configured with the explicit LAN settings
+above. Review and verify both layers before starting the process.
+
 ## API
 
 The service exposes only the following authenticated routes:
@@ -66,10 +86,11 @@ The service exposes only the following authenticated routes:
 - `POST /api/v1/node/resume`
 
 Inference accepts only the configured `mock-only-v1` model. Requests are
-size-limited, queued with one active worker, bounded by configured timeouts, and
-deduplicated by `request_id`. No shell, arbitrary file, proxy, or Ollama route is
-provided. GPU metrics are live `nvidia-smi` observations when available; model
-token counts and mock-runtime resource usage remain unavailable.
+size-limited, rate-limited per allowed source, queued with one active worker,
+bounded by configured timeouts, and deduplicated by `request_id`. No shell,
+arbitrary file, proxy, or Ollama route is provided. GPU metrics are live
+`nvidia-smi` observations when available; model token counts and mock-runtime
+resource usage remain unavailable.
 
 Application logs rotate at the configured size and count under the local
 `logs` directory. They contain lifecycle messages but never request bodies,
