@@ -1,9 +1,12 @@
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+from drx.core.gate_authority import verify_gate_approval
 
 
 class Base(DeclarativeBase):
@@ -35,6 +38,7 @@ def create_database(bind: Engine = engine) -> None:
     ):
         __import__(f"drx.models.{module_name}")
 
+    _register_gate_approval_function(bind)
     Base.metadata.create_all(bind)
     _upgrade_existing_database(bind)
     _create_task_status_trigger(bind)
@@ -56,7 +60,11 @@ def _upgrade_existing_database(bind: Engine) -> None:
             "evidence_json": "TEXT NOT NULL DEFAULT '{}'",
             "failure_reason": "TEXT NOT NULL DEFAULT ''",
         },
-        "evidence": {"run_id": "VARCHAR(64)"},
+        "evidence": {
+            "run_id": "VARCHAR(64)",
+            "verification_digest": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "approval_signature": "VARCHAR(64) NOT NULL DEFAULT ''",
+        },
         "gate_decisions": {"run_id": "VARCHAR(64)"},
     }
     with bind.begin() as connection:
@@ -74,13 +82,47 @@ def _upgrade_existing_database(bind: Engine) -> None:
                     )
 
 
+def _register_gate_approval_function(bind: Engine) -> None:
+    if bind.dialect.name == "sqlite" and not event.contains(
+        bind, "checkout", _register_sqlite_gate_approval
+    ):
+        event.listen(bind, "checkout", _register_sqlite_gate_approval)
+
+
+def _register_sqlite_gate_approval(
+    dbapi_connection: object,
+    _connection_record: object,
+    _connection_proxy: object,
+) -> None:
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        raise TypeError("SQLite Gate approval validator requires a SQLite connection")
+    dbapi_connection.create_function(
+        "drx_verify_gate_approval",
+        13,
+        verify_gate_approval,
+        deterministic=True,
+    )
+
+
 def _create_task_status_trigger(bind: Engine) -> None:
     if bind.dialect.name != "sqlite":
         return
     with bind.begin() as connection:
+        for trigger_name in (
+            "enforce_task_status_transition",
+            "reject_task_pass_insert",
+            "reject_passed_run_updates",
+            "reject_passed_run_deletes",
+            "reject_passed_evidence_updates",
+            "reject_passed_evidence_deletes",
+            "reject_passed_gate_inserts",
+            "reject_passed_gate_updates",
+            "reject_passed_gate_deletes",
+        ):
+            connection.exec_driver_sql(f"DROP TRIGGER IF EXISTS {trigger_name}")
         connection.exec_driver_sql(
             """
-                CREATE TRIGGER IF NOT EXISTS enforce_task_status_transition
+                CREATE TRIGGER enforce_task_status_transition
                 BEFORE UPDATE OF status ON tasks
                 FOR EACH ROW
                 WHEN NEW.status != OLD.status
@@ -109,6 +151,22 @@ def _create_task_status_trigger(bind: Engine) -> None:
                               AND e.producer = r.agent_id
                               AND e.result = 'pass'
                               AND r.status = 'completed'
+                              AND r.evidence_json = e.metadata_json
+                              AND drx_verify_gate_approval(
+                                  e.task_id,
+                                  e.run_id,
+                                  r.agent_id,
+                                  r.status,
+                                  r.initial_commit,
+                                  r.final_commit,
+                                  r.workspace,
+                                  e.type,
+                                  e.producer,
+                                  e.result,
+                                  e.verification_digest,
+                                  e.metadata_json,
+                                  e.approval_signature
+                              ) = 1
                               AND (
                                   SELECT COUNT(*)
                                   FROM gate_decisions AS g
@@ -138,6 +196,115 @@ def _create_task_status_trigger(bind: Engine) -> None:
                 )
                 BEGIN
                     SELECT RAISE(ABORT, 'illegal or unverified Task status transition');
+                END
+                """
+        )
+        connection.exec_driver_sql(
+            """
+                CREATE TRIGGER reject_task_pass_insert
+                BEFORE INSERT ON tasks
+                FOR EACH ROW
+                WHEN NEW.status = 'pass'
+                BEGIN
+                    SELECT RAISE(ABORT, 'Task PASS requires verified Gate evidence');
+                END
+                """
+        )
+        connection.exec_driver_sql(
+            """
+                CREATE TRIGGER reject_passed_run_updates
+                BEFORE UPDATE ON runs
+                FOR EACH ROW
+                WHEN EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE id = OLD.task_id AND status = 'pass'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'cannot modify a passed Task run');
+                END
+                """
+        )
+        connection.exec_driver_sql(
+            """
+                CREATE TRIGGER reject_passed_run_deletes
+                BEFORE DELETE ON runs
+                FOR EACH ROW
+                WHEN EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE id = OLD.task_id AND status = 'pass'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'cannot delete a passed Task run');
+                END
+                """
+        )
+        connection.exec_driver_sql(
+            """
+                CREATE TRIGGER reject_passed_evidence_updates
+                BEFORE UPDATE ON evidence
+                FOR EACH ROW
+                WHEN EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE id = OLD.task_id AND status = 'pass'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'cannot modify evidence for a passed Task');
+                END
+                """
+        )
+        connection.exec_driver_sql(
+            """
+                CREATE TRIGGER reject_passed_evidence_deletes
+                BEFORE DELETE ON evidence
+                FOR EACH ROW
+                WHEN EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE id = OLD.task_id AND status = 'pass'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'cannot delete evidence for a passed Task');
+                END
+                """
+        )
+        connection.exec_driver_sql(
+            """
+                CREATE TRIGGER reject_passed_gate_inserts
+                BEFORE INSERT ON gate_decisions
+                FOR EACH ROW
+                WHEN EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE id = NEW.task_id AND status = 'pass'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'cannot add Gates to a passed Task');
+                END
+                """
+        )
+        connection.exec_driver_sql(
+            """
+                CREATE TRIGGER reject_passed_gate_updates
+                BEFORE UPDATE ON gate_decisions
+                FOR EACH ROW
+                WHEN EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE id IN (OLD.task_id, NEW.task_id) AND status = 'pass'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'cannot modify Gates for a passed Task');
+                END
+                """
+        )
+        connection.exec_driver_sql(
+            """
+                CREATE TRIGGER reject_passed_gate_deletes
+                BEFORE DELETE ON gate_decisions
+                FOR EACH ROW
+                WHEN EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE id = OLD.task_id AND status = 'pass'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'cannot delete Gates for a passed Task');
                 END
                 """
         )

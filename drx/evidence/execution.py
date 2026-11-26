@@ -54,6 +54,7 @@ class AgentEvidence:
     gate_decision: str = "blocked"
     gate_results: tuple[dict[str, str], ...] = ()
     state_transitions: tuple[str, ...] = ()
+    verification_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

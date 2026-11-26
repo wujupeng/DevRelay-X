@@ -18,3 +18,9 @@ class EvidenceRecord(Base):
     producer: Mapped[str] = mapped_column(String(200), nullable=False)
     result: Mapped[str] = mapped_column(String(32), nullable=False)
     metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    verification_digest: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )
+    approval_signature: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )

@@ -548,6 +548,9 @@ class LocalCodingAgent:
                 for result in gate_results
             ),
             state_transitions=tuple(agent_run.transitions),
+            verification_digest=(
+                verified_evidence.evidence_digest if verified_evidence else ""
+            ),
         )
         evidence_data = evidence.to_dict()
         evidence_json = json.dumps(evidence_data, ensure_ascii=True)
@@ -557,6 +560,7 @@ class LocalCodingAgent:
         run_record.failure_reason = redact_secrets(failure_reason)
         evidence_row.result = gate_decision.value
         evidence_row.metadata_json = evidence_json
+        evidence_row.verification_digest = evidence.verification_digest
         for result in gate_results:
             session.add(
                 GateRecord(
@@ -569,7 +573,12 @@ class LocalCodingAgent:
             )
         session.flush()
         if gate_decision == GateDecision.PASS:
-            self.gate_engine.transition_task_to_pass(task_record, gate_evaluation)
+            self.gate_engine.transition_task_to_pass(
+                task_record,
+                gate_evaluation,
+                run_record=run_record,
+                evidence_record=evidence_row,
+            )
         session.commit()
         return AgentRunResult(run_id, agent_run.state, gate_decision.value, evidence_data)
 
@@ -620,6 +629,9 @@ class LocalCodingAgent:
                 or payload.get("test_exit_code") != 0
                 or payload.get("commit_created") is not True
                 or payload.get("final_commit") != run_record.final_commit
+                or not record.verification_digest
+                or payload.get("verification_digest") != record.verification_digest
+                or not record.approval_signature
             ):
                 raise ValueError("PASS evidence is missing a verified Gate or Git result")
         return payload

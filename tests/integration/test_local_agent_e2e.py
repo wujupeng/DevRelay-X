@@ -414,7 +414,7 @@ def test_git_commit_error_fails_gate_and_task(
     assert database_session.get(TaskRecord, "calculator-task").status == "fail"
 
 
-def test_tampered_persisted_evidence_is_not_returned_as_pass(
+def test_tampered_persisted_evidence_is_rejected_by_database(
     tmp_path: Path, database_session: Session
 ) -> None:
     repository = tmp_path / "calculator"
@@ -435,11 +435,17 @@ def test_tampered_persisted_evidence_is_not_returned_as_pass(
     evidence = database_session.scalars(
         select(EvidenceRecord).where(EvidenceRecord.run_id == result.run_id)
     ).one()
+    original_metadata_json = evidence.metadata_json
     evidence.metadata_json = "{}"
-    database_session.commit()
+    with pytest.raises(
+        IntegrityError, match="cannot modify evidence for a passed Task"
+    ):
+        database_session.commit()
+    database_session.rollback()
 
-    with pytest.raises(ValueError, match="do not match"):
-        agent.collect_evidence(database_session, result)
+    persisted_evidence = database_session.get(EvidenceRecord, evidence.id)
+    assert persisted_evidence is not None
+    assert persisted_evidence.metadata_json == original_metadata_json
 
 
 def test_missing_acceptance_criteria_blocks_task(
